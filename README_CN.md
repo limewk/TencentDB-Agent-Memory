@@ -198,9 +198,18 @@ bash scripts/openclaw-after-tool-call-messages.patch.sh
 > 💡 patch 每次 OpenClaw 安装只需执行一次。升级 OpenClaw 后建议重新执行以确保钩子生效。
 
 
-### 2. Hermes（Docker，需版本号 ≥ 0.3.4）
+### 2. Hermes
 
-除 OpenClaw 外，本插件同样支持 [Hermes](https://github.com/NousResearch/hermes-agent) Agent。通过一条命令即可启动一个带记忆能力的 Hermes：
+除 OpenClaw 外，本插件同样支持 [Hermes](https://github.com/NousResearch/hermes-agent) Agent。根据部署场景选择安装路径：
+
+| 你的场景 | 走哪条路 |
+|---|---|
+| 想从零启动一个带记忆能力的 Hermes（一条命令搞定） | 2.A Docker（下文） |
+| 已经装好了Hermes，只想加上记忆能力 | 2.B 挂到已有 Hermes 上（再下文） |
+
+#### 2.A Docker（全新部署，需版本号 ≥ 0.3.4）
+
+Docker 镜像把 `hermes-agent` 和 `memory_tencentdb` provider 聚合在一起，Gateway 监听 `:8420`：
 
 ```bash
 # ============ 配置参数说明 ============
@@ -248,6 +257,96 @@ docker exec -it hermes-memory hermes
 ```
 
 > 镜像内置了腾讯云 DeepSeek-V3.2 的默认值，如果你使用该模型，`MODEL_BASE_URL`/`MODEL_NAME`/`MODEL_PROVIDER` 可以省略，只传 `MODEL_API_KEY` 即可。
+
+#### 2.B 挂到已有 Hermes 上（无 Docker）
+
+如果宿主机上已经装好了 `hermes-agent`，只想加上记忆能力，**不需要** Docker 镜像。
+
+**1. 下载插件包到统一目录**：
+
+```bash
+mkdir -p ~/.memory-tencentdb
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR"
+npm init -y --silent
+npm install @tencentdb-agent-memory/memory-tencentdb@latest --omit=dev
+cp -r node_modules/@tencentdb-agent-memory/memory-tencentdb \
+      ~/.memory-tencentdb/tdai-memory-openclaw-plugin
+rm -rf "$TEMP_DIR"
+```
+
+**2. 安装 Gateway 依赖**：
+
+```bash
+cd ~/.memory-tencentdb/tdai-memory-openclaw-plugin
+npm install --omit=dev
+npm install tsx
+```
+
+**3. 链接到 Hermes 插件目录**：
+
+```bash
+rm -rf ~/.hermes/hermes-agent/plugins/memory/memory_tencentdb
+ln -sf ~/.memory-tencentdb/tdai-memory-openclaw-plugin/hermes-plugin/memory/memory_tencentdb \
+       ~/.hermes/hermes-agent/plugins/memory/memory_tencentdb
+```
+
+> 此处目录名必须是 **`memory_tencentdb`**（下划线）—— Hermes 用它作为 provider key。`memory-tencentdb`（连字符）只是配置层面的别名，**不**能作为目录名。
+
+**4. 在 `~/.hermes/config.yaml` 中声明 provider**：
+
+```yaml
+memory:
+  provider: memory_tencentdb
+```
+
+**5. 配置 Gateway 环境变量**
+
+编辑 `~/.hermes/.env`，添加：
+
+```bash
+MEMORY_TENCENTDB_GATEWAY_CMD="sh -c 'cd ~/.memory-tencentdb/tdai-memory-openclaw-plugin && exec npx tsx src/gateway/server.ts'"
+MEMORY_TENCENTDB_GATEWAY_HOST="127.0.0.1"
+MEMORY_TENCENTDB_GATEWAY_PORT="8420"
+```
+
+LLM 凭证请按需添加（Gateway 实际读取的是 `TDAI_LLM_*` 系列变量）：
+
+```bash
+TDAI_LLM_API_KEY="sk-your-api-key-here"
+TDAI_LLM_BASE_URL="https://api.openai.com/v1"
+TDAI_LLM_MODEL="gpt-4o"
+```
+
+也可改用 Gateway 配置文件 `~/.memory-tencentdb/memory-tdai/tdai-gateway.json`：
+
+```json
+{
+  "llm": {
+    "baseUrl": "https://your-api-endpoint/v1",
+    "apiKey": "your-api-key",
+    "model": "your-model-name"
+  }
+}
+```
+
+**6. 启动 Gateway**（两种方式任选其一）：
+
+- **对话时自动发现（推荐，零配置）**：不启动 Gateway，直接开始和 Hermes 对话。provider 会在第一条对话时自动检测到 `~/.memory-tencentdb/tdai-memory-openclaw-plugin/src/gateway/server.ts` 并以 `Popen()` 拉起。首次对话会略有延迟。
+- **手动运行**：提前启动一个独立的 Gateway 进程：
+  ```bash
+  cd ~/.memory-tencentdb/tdai-memory-openclaw-plugin
+  npx tsx src/gateway/server.ts
+  ```
+
+**7. 验证**：
+
+```bash
+curl http://127.0.0.1:8420/health
+# 应返回 {"status":"ok"} 或 {"status":"degraded"}
+```
+
+> Provider 的完整参考（环境变量、故障排查、LLM 工具 schema、supervisor 行为）见 [`hermes-plugin/memory/memory_tencentdb/README.md`](./hermes-plugin/memory/memory_tencentdb/README.md)，调整 supervisor / circuit-breaker 默认值之前请先读它。
 
 
 ---
